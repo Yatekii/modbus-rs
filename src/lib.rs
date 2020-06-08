@@ -4,9 +4,9 @@ use bbqueue::atomic::{consts::*, BBBuffer};
 use bbqueue::cm_mutex::{consts::*, BBBuffer};
 use bbqueue::{framed::FrameGrantR, ArrayLength};
 use crc::{crc16, Hasher16};
-use futures::{stream::Stream, task::Poll, Future};
+use futures::{task::Poll, Future};
 use nom::{bytes::streaming::take, *};
-use scroll::{ctx, Pread, LE};
+use scroll::Pread;
 use std::{
     pin::Pin,
     task::{Context, Waker},
@@ -22,14 +22,14 @@ pub enum CoilState {
     Off = 0x0000,
 }
 
-#[derive(Clone)]
+// #[derive(Clone)]
 pub struct CoilStore<'a>(FrameGrantR<'a, U256>);
 
 impl<'a> CoilStore<'a> {
-    fn iter(&self) -> CoilIterator<'a> {
+    fn into_iter(&'a self) -> CoilIterator<'a> {
         CoilIterator {
             current: 0,
-            coils: self.clone(),
+            coils: &self.0,
         }
     }
 
@@ -40,7 +40,7 @@ impl<'a> CoilStore<'a> {
 
 pub struct CoilIterator<'a> {
     current: usize,
-    coils: CoilStore<'a>,
+    coils: &'a [u8],
 }
 
 impl<'a> Iterator for CoilIterator<'a> {
@@ -50,7 +50,7 @@ impl<'a> Iterator for CoilIterator<'a> {
         let bit = self.current % 8;
         if byte < self.coils.len() {
             self.current += 1;
-            Some(if self.coils.0[byte] >> bit & 1 == 1 {
+            Some(if self.coils[byte] >> bit & 1 == 1 {
                 CoilState::On
             } else {
                 CoilState::Off
@@ -98,129 +98,154 @@ pub enum Request<'a> {
     },
 }
 
-pub struct Modbus<S: ArrayLength<u8>> {
+pub struct Modbus<'a, S: ArrayLength<u8>> {
     buffer: BBBuffer<S>,
     waker: Option<Waker>,
-    frame_ready: bool,
+    current_frame: Option<Result<Request<'a>, Error>>,
     needed: usize,
+    frame_position: usize,
 }
 
-impl<S: ArrayLength<u8>> Modbus<S> {
-    pub fn new() -> Modbus<S> {
+impl<'a, S: ArrayLength<u8>> Modbus<'a, S> {
+    pub fn new() -> Modbus<'a, S> {
         let bb: BBBuffer<S> = BBBuffer::new();
 
         Modbus {
             buffer: bb,
             waker: None,
-            frame_ready: false,
+            current_frame: None,
             needed: 0,
+            frame_position: 0,
         }
     }
 
-    fn parse_read_request(&self, data: &[u8], input: &[u8]) -> Result<(u16, u16), Error> {
+    fn crc_valid(data: &[u8], crc: u16) -> bool {
+        let mut digest = crc16::Digest::new(crc::crc16::USB);
+        digest.write(data);
+        digest.sum16() == crc
+    }
+
+    fn parse_read_request<'b>(input: &'b [u8]) -> IResult<&'b [u8], (u16, u16, u16)> {
         let (input, address) = take(2usize)(input)?;
         let (input, count) = take(2usize)(input)?;
-
-        // Check the CRC.
         let (input, crc) = take(2usize)(input)?;
-        let mut digest = crc16::Digest::new(crc::crc16::USB);
-        digest.write(&data[..data.len() - 2]);
-        if digest.sum16() != crc.pread(0).unwrap() {
-            return Err(Error::Crc);
-        }
 
         let address: u16 = address.pread(0).unwrap();
         let count: u16 = count.pread(0).unwrap();
+        let crc: u16 = crc.pread(0).unwrap();
 
-        Ok((address, count))
+        Ok((input, (address, count, crc)))
     }
 
-    fn parse_frame(&mut self, data: &[u8]) -> Result<Request, Error> {
-        let (producer, consumer) = self.buffer.try_split_framed().unwrap();
+    fn parse_frame(data: &'static [u8]) -> Result<(Request<'a>, usize), Error> {
+        // let (producer, consumer) = self.buffer.try_split_framed().unwrap();
 
-        let rgr = consumer.read().unwrap();
-        rgr
+        // let rgr = consumer.read().unwrap();
+        // let data = &rgr[..];
 
         let (input, _slave_address) = take(1usize)(data)?;
         let (input, function) = take(1usize)(input)?;
 
         match function[0] {
             1 => {
-                let (address, count) = self.parse_read_request(data, input)?;
-                Ok(Request::ReadCoil { address, count })
+                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
+                Ok((Request::ReadCoil { address, count }, 0))
             }
             2 => {
-                let (address, count) = self.parse_read_request(data, input)?;
-                Ok(Request::ReadInput { address, count })
+                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
+                Ok((Request::ReadInput { address, count }, 0))
             }
             3 => {
-                let (address, count) = self.parse_read_request(data, input)?;
-                Ok(Request::ReadOutputRegisters { address, count })
+                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
+                Ok((Request::ReadOutputRegisters { address, count }, 0))
             }
             4 => {
-                let (address, count) = self.parse_read_request(data, input)?;
-                Ok(Request::ReadInputRegisters { address, count })
+                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
+                Ok((Request::ReadInputRegisters { address, count }, 0))
             }
             5 => {
                 // TODO:
-                let (address, count) = self.parse_read_request(data, input)?;
-                Ok(Request::ReadCoil { address, count })
+                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
+                Ok((Request::ReadCoil { address, count }, 0))
             }
             6 => {
                 // TODO:
-                let (address, count) = self.parse_read_request(data, input)?;
-                Ok(Request::ReadCoil { address, count })
+                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
+                Ok((Request::ReadCoil { address, count }, 0))
             }
             15 => {
                 // TODO:
-                let (address, count) = self.parse_read_request(data, input)?;
-                Ok(Request::ReadCoil { address, count })
+                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
+                Ok((Request::ReadCoil { address, count }, 0))
             }
             16 => {
                 // TODO:
-                let (address, count) = self.parse_read_request(data, input)?;
-                Ok(Request::ReadCoil { address, count })
+                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
+                Ok((Request::ReadCoil { address, count }, 0))
             }
             f => Err(Error::UnknownFunction(f)),
         }
     }
 
     /// Call this in the data received interrupt.
-    pub fn on_data_received(&mut self, data: &[u8]) {
-        if data.len() >= self.needed {
+    pub fn on_data_received(&'static mut self, data: &[u8]) {
+        // Add the newly received data to the grant.
+        let (mut producer, _consumer) = self.buffer.try_split_framed().unwrap();
+        let mut wgr = producer.grant(256).unwrap();
+        wgr[self.frame_position..self.frame_position + data.len()].clone_from_slice(&data);
+
+        if wgr.len() >= self.needed {
             self.needed = 0;
         } else {
             return;
         }
 
-        match self.parse_frame(data) {
+        match Self::parse_frame(&wgr[..]) {
+            // If the frame is not complete yet, wait for more bytes.
             Err(Error::Parse(Err::Incomplete(needed))) => match needed {
+                // Do nothing if the parser has no info about the number of required bytes.
                 Needed::Unknown => (),
-                Needed::Size(size) => self.needed = size,
+                // Remember the number of the needed bytes until we can parse the frame if the number is known.
+                // TODO: determine if this actually ever hits or if we can spare those few instructions.
+                Needed::Size(number) => self.needed = number,
             },
-            Ok(_) | Err(_) => {
-                self.frame_ready = true;
+            // If we succeed to parse the frame, commit the bytes to the buffer and reset the position in the frame to 0.
+            // Then wake the waker.
+            Ok((frame, frame_size)) => {
+                self.current_frame = Some(Ok(frame));
+                if let Some(waker) = self.waker.take() {
+                    self.frame_position = 0;
+                    wgr.commit(frame_size);
+                    waker.wake();
+                }
+            }
+            // If we fail to parse the frame, do NOT commit the bytes to the buffer and reset the position in the frame to 0.
+            // This way we can reuse the frame space.
+            // Then wake the waker.
+            Err(err) => {
+                self.current_frame = Some(Err(err));
                 if let Some(waker) = self.waker.take() {
                     waker.wake();
+                    self.frame_position = 0;
                 }
             }
         }
     }
 
-    pub async fn next(&mut self) -> Result<Request<'_>, Error> {
+    pub async fn next(&'a mut self) -> Result<Request<'a>, Error> {
         struct RequestFuture<'a, S: ArrayLength<u8>> {
-            bus: &'a mut Modbus<S>,
+            bus: &'a mut Modbus<'a, S>,
         }
 
         impl<'a, S: ArrayLength<u8>> Future for RequestFuture<'a, S> {
             type Output = Result<Request<'a>, Error>;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                if !self.bus.frame_ready {
+                if let Some(frame) = self.bus.current_frame.take() {
+                    Poll::Ready(frame)
+                } else {
                     self.bus.waker = Some(cx.waker().clone());
                     Poll::Pending
-                } else {
-                    Poll::Ready(self.bus.parse_frame(&[]))
                 }
             }
         }
@@ -234,9 +259,19 @@ pub enum Error {
     #[error("CRC could not be validated")]
     Crc,
     #[error("Message could not be parsed")]
-    Parse(#[from] nom::Err<()>),
+    Parse(nom::Err<nom::error::ErrorKind>),
     #[error("Unknown function: {0}")]
     UnknownFunction(u8),
+}
+
+impl From<nom::Err<(&'static [u8], nom::error::ErrorKind)>> for Error {
+    fn from(e: nom::Err<(&'static [u8], nom::error::ErrorKind)>) -> Self {
+        Error::Parse(match e {
+            nom::Err::Error((_r, e)) => nom::Err::Error(e),
+            nom::Err::Failure((_r, e)) => nom::Err::Failure(e),
+            nom::Err::Incomplete(e) => nom::Err::Incomplete(e),
+        })
+    }
 }
 
 #[cfg(test)]
