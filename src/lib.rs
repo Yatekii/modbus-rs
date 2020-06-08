@@ -2,7 +2,10 @@
 use bbqueue::atomic::{consts::*, BBBuffer};
 #[cfg(not(feature = "atomic"))]
 use bbqueue::cm_mutex::{consts::*, BBBuffer};
-use bbqueue::{framed::FrameGrantR, ArrayLength};
+use bbqueue::{
+    framed::{FrameConsumer, FrameGrantR, FrameGrantW, FrameProducer},
+    ArrayLength,
+};
 use crc::{crc16, Hasher16};
 use futures::{task::Poll, Future};
 use nom::{bytes::streaming::take, *};
@@ -23,9 +26,9 @@ pub enum CoilState {
 }
 
 // #[derive(Clone)]
-pub struct CoilStore<'a>(FrameGrantR<'a, U256>);
+pub struct CoilStore<'a, S: ArrayLength<u8>>(FrameGrantR<'a, S>);
 
-impl<'a> CoilStore<'a> {
+impl<'a, S: ArrayLength<u8>> CoilStore<'a, S> {
     fn into_iter(&'a self) -> CoilIterator<'a> {
         CoilIterator {
             current: 0,
@@ -61,7 +64,7 @@ impl<'a> Iterator for CoilIterator<'a> {
     }
 }
 
-pub enum Request<'a> {
+pub enum Request<'a, S: ArrayLength<u8>> {
     ReadCoil {
         address: u16,
         count: u16,
@@ -89,7 +92,7 @@ pub enum Request<'a> {
     SetCoils {
         address: u16,
         count: u16,
-        coils: CoilStore<'a>,
+        coils: CoilStore<'a, S>,
     },
     SetRegisters {
         address: u16,
@@ -99,19 +102,21 @@ pub enum Request<'a> {
 }
 
 pub struct Modbus<'a, S: ArrayLength<u8>> {
-    buffer: BBBuffer<S>,
+    producer: FrameProducer<'a, S>,
+    consumer: FrameConsumer<'a, S>,
     waker: Option<Waker>,
-    current_frame: Option<Result<Request<'a>, Error>>,
+    current_frame: Option<Result<Request<'a, S>, Error>>,
     needed: usize,
     frame_position: usize,
 }
 
-impl<'a, S: ArrayLength<u8>> Modbus<'a, S> {
-    pub fn new() -> Modbus<'a, S> {
-        let bb: BBBuffer<S> = BBBuffer::new();
+impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
+    pub fn new(bb: &'a BBBuffer<S>) -> Modbus<'a, S> {
+        let (producer, consumer) = bb.try_split_framed().unwrap();
 
         Modbus {
-            buffer: bb,
+            producer,
+            consumer,
             waker: None,
             current_frame: None,
             needed: 0,
@@ -137,11 +142,13 @@ impl<'a, S: ArrayLength<u8>> Modbus<'a, S> {
         Ok((input, (address, count, crc)))
     }
 
-    fn parse_frame(data: &'static [u8]) -> Result<(Request<'a>, usize), Error> {
+    fn parse_frame(&mut self, wgr: FrameGrantW<S>) -> Result<Request<'a, S>, Error> {
         // let (producer, consumer) = self.buffer.try_split_framed().unwrap();
 
         // let rgr = consumer.read().unwrap();
         // let data = &rgr[..];
+
+        let data = &wgr[..];
 
         let (input, _slave_address) = take(1usize)(data)?;
         let (input, function) = take(1usize)(input)?;
@@ -149,49 +156,61 @@ impl<'a, S: ArrayLength<u8>> Modbus<'a, S> {
         match function[0] {
             1 => {
                 let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                Ok((Request::ReadCoil { address, count }, 0))
+                wgr.commit(0);
+                Ok(Request::ReadCoil { address, count })
             }
             2 => {
                 let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                Ok((Request::ReadInput { address, count }, 0))
+                wgr.commit(0);
+                Ok(Request::ReadInput { address, count })
             }
             3 => {
                 let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                Ok((Request::ReadOutputRegisters { address, count }, 0))
+                wgr.commit(0);
+                Ok(Request::ReadOutputRegisters { address, count })
             }
             4 => {
                 let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                Ok((Request::ReadInputRegisters { address, count }, 0))
+                wgr.commit(0);
+                Ok(Request::ReadInputRegisters { address, count })
             }
             5 => {
                 // TODO:
                 let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                Ok((Request::ReadCoil { address, count }, 0))
+                wgr.commit(0);
+                Ok(Request::ReadCoil { address, count })
             }
             6 => {
                 // TODO:
                 let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                Ok((Request::ReadCoil { address, count }, 0))
+                wgr.commit(0);
+                Ok(Request::ReadCoil { address, count })
             }
             15 => {
                 // TODO:
                 let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                Ok((Request::ReadCoil { address, count }, 0))
+                wgr.commit(0);
+                let rgr = self.consumer.read().unwrap();
+                Ok(Request::SetCoils {
+                    address,
+                    count,
+                    coils: CoilStore(rgr),
+                })
             }
             16 => {
                 // TODO:
                 let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                Ok((Request::ReadCoil { address, count }, 0))
+                wgr.commit(0);
+                Ok(Request::ReadCoil { address, count })
             }
             f => Err(Error::UnknownFunction(f)),
         }
     }
 
     /// Call this in the data received interrupt.
-    pub fn on_data_received(&'static mut self, data: &[u8]) {
+    pub fn on_data_received(&'a mut self, data: &[u8]) {
         // Add the newly received data to the grant.
-        let (mut producer, _consumer) = self.buffer.try_split_framed().unwrap();
-        let mut wgr = producer.grant(256).unwrap();
+        let mut wgr = self.producer.grant(256).unwrap();
         wgr[self.frame_position..self.frame_position + data.len()].clone_from_slice(&data);
 
         if wgr.len() >= self.needed {
@@ -200,7 +219,7 @@ impl<'a, S: ArrayLength<u8>> Modbus<'a, S> {
             return;
         }
 
-        match Self::parse_frame(&wgr[..]) {
+        match self.parse_frame(wgr) {
             // If the frame is not complete yet, wait for more bytes.
             Err(Error::Parse(Err::Incomplete(needed))) => match needed {
                 // Do nothing if the parser has no info about the number of required bytes.
@@ -211,11 +230,10 @@ impl<'a, S: ArrayLength<u8>> Modbus<'a, S> {
             },
             // If we succeed to parse the frame, commit the bytes to the buffer and reset the position in the frame to 0.
             // Then wake the waker.
-            Ok((frame, frame_size)) => {
+            Ok(frame) => {
                 self.current_frame = Some(Ok(frame));
                 if let Some(waker) = self.waker.take() {
                     self.frame_position = 0;
-                    wgr.commit(frame_size);
                     waker.wake();
                 }
             }
@@ -232,13 +250,13 @@ impl<'a, S: ArrayLength<u8>> Modbus<'a, S> {
         }
     }
 
-    pub async fn next(&'a mut self) -> Result<Request<'a>, Error> {
+    pub async fn next(&'a mut self) -> Result<Request<'a, S>, Error> {
         struct RequestFuture<'a, S: ArrayLength<u8>> {
             bus: &'a mut Modbus<'a, S>,
         }
 
         impl<'a, S: ArrayLength<u8>> Future for RequestFuture<'a, S> {
-            type Output = Result<Request<'a>, Error>;
+            type Output = Result<Request<'a, S>, Error>;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
                 if let Some(frame) = self.bus.current_frame.take() {
@@ -264,8 +282,8 @@ pub enum Error {
     UnknownFunction(u8),
 }
 
-impl From<nom::Err<(&'static [u8], nom::error::ErrorKind)>> for Error {
-    fn from(e: nom::Err<(&'static [u8], nom::error::ErrorKind)>) -> Self {
+impl From<nom::Err<(&[u8], nom::error::ErrorKind)>> for Error {
+    fn from(e: nom::Err<(&[u8], nom::error::ErrorKind)>) -> Self {
         Error::Parse(match e {
             nom::Err::Error((_r, e)) => nom::Err::Error(e),
             nom::Err::Failure((_r, e)) => nom::Err::Failure(e),
