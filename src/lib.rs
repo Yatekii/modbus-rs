@@ -208,7 +208,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
     }
 
     /// Call this in the data received interrupt.
-    pub fn on_data_received(&'a mut self, data: &[u8]) {
+    pub fn on_data_received(&mut self, data: &[u8]) {
         // Add the newly received data to the grant.
         let mut wgr = self.producer.grant(256).unwrap();
         wgr[self.frame_position..self.frame_position + data.len()].clone_from_slice(&data);
@@ -250,12 +250,12 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
         }
     }
 
-    pub async fn next(&'a mut self) -> Result<Request<'a, S>, Error> {
-        struct RequestFuture<'a, S: ArrayLength<u8>> {
-            bus: &'a mut Modbus<'a, S>,
+    pub async fn next(&mut self) -> Result<Request<'_, S>, Error> {
+        struct RequestFuture<'a: 'b, 'b, S: ArrayLength<u8>> {
+            bus: &'b mut Modbus<'a, S>,
         }
 
-        impl<'a, S: ArrayLength<u8>> Future for RequestFuture<'a, S> {
+        impl<'a: 'b, 'b, S: ArrayLength<u8>> Future for RequestFuture<'a, 'b, S> {
             type Output = Result<Request<'a, S>, Error>;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -294,8 +294,12 @@ impl From<nom::Err<(&[u8], nom::error::ErrorKind)>> for Error {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test() {
+    #[tokio::test]
+    async fn test() {
         println!("Hello, world!");
+        let bb = bbqueue::BBBuffer::<bbqueue::atomic::consts::U2048>::new();
+        let mut modbus = super::Modbus::new(&bb);
+        modbus.on_data_received(&[0x42, 0x42]);
+        modbus.next().await.unwrap();
     }
 }
