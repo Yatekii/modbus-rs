@@ -13,6 +13,7 @@ thiserror = "*"
 crc = "1.8.1"
 bbqueue = "0.4.8"
 futures = "0.3.5"
+crc16 = "*"
 
 [dev-dependencies]
 tokio = { version = "0.2", features = ["full"] }

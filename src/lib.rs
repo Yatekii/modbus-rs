@@ -6,10 +6,9 @@ use bbqueue::{
     framed::{FrameConsumer, FrameGrantR, FrameGrantW, FrameProducer},
     ArrayLength,
 };
-use crc::{crc16, Hasher16};
 use futures::{task::Poll, Future};
 use nom::{bytes::streaming::take, *};
-use scroll::Pread;
+use scroll::{Pread, BE, LE};
 use std::{
     pin::Pin,
     task::{Context, Waker},
@@ -20,12 +19,13 @@ pub struct Frame {}
 // pub struct Request {}
 pub struct Response {}
 
+#[derive(Debug, PartialEq)]
 pub enum CoilState {
     On = 0xFF00,
     Off = 0x0000,
 }
 
-// #[derive(Clone)]
+#[derive(Debug, PartialEq)]
 pub struct CoilStore<'a, S: ArrayLength<u8>>(FrameGrantR<'a, S>);
 
 impl<'a, S: ArrayLength<u8>> CoilStore<'a, S> {
@@ -64,6 +64,7 @@ impl<'a> Iterator for CoilIterator<'a> {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub enum Request<'a, S: ArrayLength<u8>> {
     ReadCoil {
         address: u16,
@@ -125,9 +126,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
     }
 
     fn crc_valid(data: &[u8], crc: u16) -> bool {
-        let mut digest = crc16::Digest::new(crc::crc16::USB);
-        digest.write(data);
-        digest.sum16() == crc
+        crc16::State::<crc16::MODBUS>::calculate(data) == 0
     }
 
     fn parse_read_request<'b>(input: &'b [u8]) -> IResult<&'b [u8], (u16, u16, u16)> {
@@ -135,9 +134,9 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
         let (input, count) = take(2usize)(input)?;
         let (input, crc) = take(2usize)(input)?;
 
-        let address: u16 = address.pread(0).unwrap();
-        let count: u16 = count.pread(0).unwrap();
-        let crc: u16 = crc.pread(0).unwrap();
+        let address: u16 = address.pread_with(0, BE).unwrap();
+        let count: u16 = count.pread_with(0, BE).unwrap();
+        let crc: u16 = crc.pread_with(0, LE).unwrap();
 
         Ok((input, (address, count, crc)))
     }
@@ -153,10 +152,14 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
         let (input, _slave_address) = take(1usize)(data)?;
         let (input, function) = take(1usize)(input)?;
 
-        match function[0] {
+        let r = match function[0] {
             1 => {
-                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
+                let (_input, (address, count, crc)) = Self::parse_read_request(input)?;
+                let crc_valid = Self::crc_valid(&data[..8], crc);
                 wgr.commit(0);
+                if !crc_valid {
+                    return Err(Error::Crc);
+                }
                 Ok(Request::ReadCoil { address, count })
             }
             2 => {
@@ -204,7 +207,9 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
                 Ok(Request::ReadCoil { address, count })
             }
             f => Err(Error::UnknownFunction(f)),
-        }
+        };
+
+        r
     }
 
     /// Call this in the data received interrupt.
@@ -272,7 +277,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
     }
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum Error {
     #[error("CRC could not be validated")]
     Crc,
@@ -294,12 +299,129 @@ impl From<nom::Err<(&[u8], nom::error::ErrorKind)>> for Error {
 
 #[cfg(test)]
 mod tests {
+    use super::{Error, Modbus, Request};
+    use bbqueue::{atomic::consts::U2048, BBBuffer};
+
     #[tokio::test]
-    async fn test() {
-        println!("Hello, world!");
-        let bb = bbqueue::BBBuffer::<bbqueue::atomic::consts::U2048>::new();
+    async fn fn1_crc_correct() {
+        let bb = BBBuffer::<U2048>::new();
         let mut modbus = super::Modbus::new(&bb);
-        modbus.on_data_received(&[0x42, 0x42]);
-        modbus.next().await.unwrap();
+
+        let data = [0x11, 0x01, 0x00, 0x13, 0x00, 0x25, 0x0E, 0x84];
+        let address: u16 = 0x0013;
+        let count: u16 = 0x0025;
+
+        modbus.on_data_received(&data);
+        assert_eq!(
+            modbus.next().await,
+            Ok(Request::ReadCoil { address, count })
+        );
     }
+
+    #[tokio::test]
+    async fn fn1_crc_fail() {
+        let bb = BBBuffer::<U2048>::new();
+        let mut modbus = Modbus::new(&bb);
+
+        let data = [0x11, 0x01, 0x00, 0x13, 0x00, 0x25, 0x0E, 0x85];
+
+        modbus.on_data_received(&data);
+        assert_eq!(modbus.next().await, Err(Error::Crc));
+    }
+
+    #[tokio::test]
+    async fn fn1_incomplete() {
+        let bb = BBBuffer::<U2048>::new();
+        let mut modbus = super::Modbus::new(&bb);
+
+        let data = [0x11, 0x01, 0x00, 0x13];
+        let address: u16 = 0x0013;
+        let count: u16 = 0x0025;
+
+        modbus.on_data_received(&data);
+        assert_eq!(
+            modbus.next().await,
+            Ok(Request::ReadCoil { address, count })
+        );
+    }
+
+    #[test]
+    fn fn2() {
+        let data = [0x11, 0x02, 0x00, 0xC4, 0x00, 0x16, 0xBA, 0xA9];
+        let slave_address = 0x11;
+        let fn_code = 0x02;
+        let address = 0x00C4;
+        let count = 0x0016;
+        let crc = 0xBAA9;
+    }
+
+    #[test]
+    fn fn3() {
+        let data = [0x11, 0x03, 0x00, 0x6B, 0x00, 0x03, 0x76, 0x87];
+        let slave_address = 0x11;
+        let fn_code = 0x03;
+        let address = 0x006B;
+        let count = 0x0003;
+        let crc = 0x7687;
+    }
+
+    #[test]
+    fn fn4() {
+        let data = [0x11, 0x04, 0x00, 0x08, 0x00, 0x01, 0xB2, 0x98];
+        let slave_address = 0x11;
+        let fn_code = 0x04;
+        let address = 0x0008;
+        let count = 0x0001;
+        let crc = 0xB298;
+    }
+
+    #[test]
+    fn fn5_on() {
+        let data = [0x11, 0x05, 0x00, 0xAC, 0xFF, 0x00, 0x4E, 0x8B];
+        let slave_address = 0x11;
+        let fn_code = 0x05;
+        let address = 0x00AC;
+        let status = true;
+        let crc = 0x4E8B;
+    }
+
+    #[test]
+    fn fn5_off() {
+        let data = [0x11, 0x05, 0x00, 0xAC, 0x00, 0xFF, 0x4E, 0x8B];
+        let slave_address = 0x11;
+        let fn_code = 0x05;
+        let address = 0x00AC;
+        let status = false;
+        let crc = 0x4E8B;
+    }
+
+    // #[test]
+    // fn fn6() {
+    //     let data = [0x11, 0x06, 0x00, 0x01 0003 9A9B];
+    //     let slave_address = 0x11;
+    //     let fn_code = 0x06;
+    //     let address = 0x0001;
+    //     let count = 0x0025;
+    //     let crc = 0x9A9B;
+    // }
+
+    // #[test]
+    // fn fn15() {
+    //     let data = [11 0F 0013 000A 02 CD01 BF0B];
+    //     let slave_address = 0x11;
+    //     let fn_code = 0x0F;
+    //     let address = 0x0013;
+    //     let count = 0x0025;
+    //     let crc = 0xBF0B;
+    // }
+
+    // #[test]
+    // fn fn16() {
+    //     let data = [11 10 0001 0002 04 000A 0102 C6F0];
+    //     let slave_address = 0x11;
+    //     let fn_code = 0x10;
+    //     let address = 0x0013;
+    //     let count = 0x0025;
+    //     let crc = 0x0E84;
+    // }
 }
