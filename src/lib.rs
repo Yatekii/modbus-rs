@@ -348,6 +348,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[ignore]
+    async fn fn1_2_futures_data_in_2_steps() {
+        let bb = BBBuffer::<U2048>::new();
+        let mut modbus = super::Modbus::new(&bb);
+
+        let data = [0x11, 0x01, 0x00, 0x13];
+        let address: u16 = 0x0013;
+        let count: u16 = 0x0025;
+
+        let data = [0x11, 0x01, 0x00, 0x13];
+        modbus.on_data_received(&data);
+        let data = [0x00, 0x25, 0x0E, 0x84];
+        modbus.on_data_received(&data);
+
+        let data = [0x11, 0x01, 0x00, 0x13];
+        modbus.on_data_received(&data);
+        let data = [0x00, 0x25, 0x0E, 0x84];
+        modbus.on_data_received(&data);
+
+        assert_eq!(
+            modbus.next().await,
+            Ok(Request::ReadCoil { address, count })
+        );
+        assert_eq!(
+            modbus.next().await,
+            Ok(Request::ReadCoil { address, count })
+        );
+    }
+
     #[test]
     fn fn2() {
         let data = [0x11, 0x02, 0x00, 0xC4, 0x00, 0x16, 0xBA, 0xA9];
