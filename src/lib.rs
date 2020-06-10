@@ -108,7 +108,7 @@ pub struct Modbus<'a, S: ArrayLength<u8>> {
     waker: Option<Waker>,
     current_frame: Option<Result<Request<'a, S>, Error>>,
     needed: usize,
-    frame_position: usize,
+    frame_size: usize,
 }
 
 impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
@@ -121,7 +121,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
             waker: None,
             current_frame: None,
             needed: 0,
-            frame_position: 0,
+            frame_size: 0,
         }
     }
 
@@ -147,7 +147,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
         // let rgr = consumer.read().unwrap();
         // let data = &rgr[..];
 
-        let data = &wgr[..];
+        let data = &wgr[..self.frame_size];
 
         let (input, _slave_address) = take(1usize)(data)?;
         let (input, function) = take(1usize)(input)?;
@@ -156,10 +156,10 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
             1 => {
                 let (_input, (address, count, crc)) = Self::parse_read_request(input)?;
                 let crc_valid = Self::crc_valid(&data[..8], crc);
-                wgr.commit(0);
                 if !crc_valid {
                     return Err(Error::Crc);
                 }
+                wgr.commit(6);
                 Ok(Request::ReadCoil { address, count })
             }
             2 => {
@@ -216,7 +216,8 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
     pub fn on_data_received(&mut self, data: &[u8]) {
         // Add the newly received data to the grant.
         let mut wgr = self.producer.grant(256).unwrap();
-        wgr[self.frame_position..self.frame_position + data.len()].clone_from_slice(&data);
+        wgr[self.frame_size..self.frame_size + data.len()].clone_from_slice(&data);
+        self.frame_size += data.len();
 
         if wgr.len() >= self.needed {
             self.needed = 0;
@@ -238,7 +239,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
             Ok(frame) => {
                 self.current_frame = Some(Ok(frame));
                 if let Some(waker) = self.waker.take() {
-                    self.frame_position = 0;
+                    self.frame_size = 0;
                     waker.wake();
                 }
             }
@@ -249,7 +250,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
                 self.current_frame = Some(Err(err));
                 if let Some(waker) = self.waker.take() {
                     waker.wake();
-                    self.frame_position = 0;
+                    self.frame_size = 0;
                 }
             }
         }
@@ -330,7 +331,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fn1_incomplete() {
+    async fn fn1_data_in_2_steps() {
         let bb = BBBuffer::<U2048>::new();
         let mut modbus = super::Modbus::new(&bb);
 
@@ -338,6 +339,8 @@ mod tests {
         let address: u16 = 0x0013;
         let count: u16 = 0x0025;
 
+        modbus.on_data_received(&data);
+        let data = [0x00, 0x25, 0x0E, 0x84];
         modbus.on_data_received(&data);
         assert_eq!(
             modbus.next().await,
