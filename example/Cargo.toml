@@ -1,5 +1,5 @@
 [package]
-name = "modbus-rs"
+name = "example"
 version = "0.1.0"
 authors = ["Noah Hüsser <yatekii@yatekii.ch>"]
 edition = "2018"
@@ -7,12 +7,12 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+modbus-rs = { path = "../" }
 bbqueue = "0.4.8"
-futures = { version = "0.3.5", default-features = false }
-crc16 = "0.4.0"
-
-[dev-dependencies]
-tokio = { version = "0.2", features = ["macros", "rt-threaded"] }
+cortex-m = "0.6.2"
+cortex-m-rt = "0.6.12"
+panic-rtt-core = "0.1.1"
+async-embedded = { git = "https://github.com/rust-embedded-community/async-on-embedded.git" }
 
 [profile.dev]
 codegen-units = 1

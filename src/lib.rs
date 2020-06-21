@@ -6,12 +6,12 @@ use bbqueue::atomic::BBBuffer;
 #[cfg(not(feature = "atomic"))]
 use bbqueue::cm_mutex::BBBuffer;
 use bbqueue::{ArrayLength, Consumer, GrantR, Producer};
+use core::convert::TryInto;
 use core::{
     pin::Pin,
     task::{Context, Waker},
 };
 use futures::{task::Poll, Future};
-use scroll::{Pread, BE};
 
 pub struct Frame {}
 pub struct Response {}
@@ -120,7 +120,7 @@ pub struct Modbus<'a, S: ArrayLength<u8>> {
 
 impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
     pub fn new(bb: &'a BBBuffer<S>) -> Modbus<'a, S> {
-        let (producer, consumer) = bb.try_split().unwrap();
+        let (producer, consumer) = bb.try_split().unwrap_or_else(|_| panic!());
 
         Modbus {
             producer,
@@ -138,14 +138,17 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
     }
 
     fn parse_read_request<'b>(data: &'b [u8]) -> (u16, u16) {
-        let address: u16 = data.pread_with(0, BE).unwrap();
-        let count: u16 = data.pread_with(2, BE).unwrap();
+        // The next two unwraps don't increase binary size apparently.
+        let address = u16::from_be_bytes(data[0..2].try_into().unwrap_or_else(|_| panic!()));
+        let count = u16::from_be_bytes(data[2..4].try_into().unwrap_or_else(|_| panic!()));
 
         (address, count)
     }
 
     fn parse_frame(&mut self, rgr: GrantR<S>) -> Result<Request<'a, S>, Error> {
-        let len = parse_request_len(&rgr[..]).unwrap().unwrap();
+        let len = parse_request_len(&rgr[..])
+            .unwrap_or_else(|_| panic!())
+            .unwrap_or_else(|| panic!());
         let crc_valid = Self::crc_valid(&rgr[..len]);
         if !crc_valid {
             return Err(Error::Crc);
@@ -184,7 +187,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
             15 => {
                 // TODO:
                 let (address, count) = Self::parse_read_request(data);
-                let rgr = self.consumer.read().unwrap();
+                let rgr = self.consumer.read().unwrap_or_else(|_| panic!());
                 Ok(Request::SetCoils {
                     address,
                     count,
@@ -205,7 +208,10 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
     /// Call this in the data received interrupt.
     pub fn on_data_received(&mut self, data: &[u8]) {
         // Get a grant that is as large as the size of the received data.
-        let mut wgr = self.producer.grant_exact(data.len()).unwrap();
+        let mut wgr = self
+            .producer
+            .grant_exact(data.len())
+            .unwrap_or_else(|_| panic!());
 
         // Copy the data from the receive buffer into the bbqueue.
         wgr.clone_from_slice(&data);
@@ -214,7 +220,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
         wgr.commit(data.len());
 
         // TODO: Handle wraparound.
-        let rgr = self.consumer.read().unwrap();
+        let rgr = self.consumer.read().unwrap_or_else(|_| panic!());
         if let Some(needed_bytes) = self.needed_bytes {
             // If we don't need anymore bytes, call the waker.
             if rgr.len() >= needed_bytes {
@@ -248,14 +254,14 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
                         // Reset needed bytes to unknown for the next frame.
                         self.bus.needed_bytes = None;
                         // Read the stored bytes.
-                        let rgr = self.bus.consumer.read().unwrap();
+                        let rgr = self.bus.consumer.read().unwrap_or_else(|_| panic!());
                         // Parse and return the frame from the stored bytes.
                         Poll::Ready(self.bus.parse_frame(rgr))
                     }
                     None => {
                         self.bus.waker = Some(cx.waker().clone());
                         // Read the stored bytes.
-                        let rgr = self.bus.consumer.read().unwrap();
+                        let rgr = self.bus.consumer.read().unwrap_or_else(|_| panic!());
                         match parse_request_len(&rgr[..]) {
                             Ok(len) => {
                                 // We store the number of needed bytes, whether it is known or unknown (None, Some(len)).
