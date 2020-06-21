@@ -1,22 +1,19 @@
+#![no_std]
+mod consts;
+
 #[cfg(feature = "atomic")]
-use bbqueue::atomic::{consts::*, BBBuffer};
+use bbqueue::atomic::BBBuffer;
 #[cfg(not(feature = "atomic"))]
-use bbqueue::cm_mutex::{consts::*, BBBuffer};
-use bbqueue::{
-    framed::{FrameConsumer, FrameGrantR, FrameGrantW, FrameProducer},
-    ArrayLength,
-};
-use futures::{task::Poll, Future};
-use nom::{bytes::streaming::take, *};
-use scroll::{Pread, BE, LE};
-use std::{
+use bbqueue::cm_mutex::BBBuffer;
+use bbqueue::{ArrayLength, Consumer, GrantR, Producer};
+use core::{
     pin::Pin,
     task::{Context, Waker},
 };
-use thiserror::Error;
+use futures::{task::Poll, Future};
+use scroll::{Pread, BE};
 
 pub struct Frame {}
-// pub struct Request {}
 pub struct Response {}
 
 #[derive(Debug, PartialEq)]
@@ -26,18 +23,30 @@ pub enum CoilState {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct CoilStore<'a, S: ArrayLength<u8>>(FrameGrantR<'a, S>);
+pub struct CoilStore<'a, S: ArrayLength<u8>>(GrantR<'a, S>);
 
 impl<'a, S: ArrayLength<u8>> CoilStore<'a, S> {
-    fn into_iter(&'a self) -> CoilIterator<'a> {
+    pub fn iter(&'a self) -> CoilIterator<'a> {
         CoilIterator {
             current: 0,
             coils: &self.0,
         }
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.0.len()
+    }
+}
+
+impl<'a, S: ArrayLength<u8>> IntoIterator for &'a CoilStore<'a, S> {
+    type Item = CoilState;
+    type IntoIter = CoilIterator<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        CoilIterator {
+            current: 0,
+            coils: &self.0,
+        }
     }
 }
 
@@ -103,96 +112,78 @@ pub enum Request<'a, S: ArrayLength<u8>> {
 }
 
 pub struct Modbus<'a, S: ArrayLength<u8>> {
-    producer: FrameProducer<'a, S>,
-    consumer: FrameConsumer<'a, S>,
+    producer: Producer<'a, S>,
+    consumer: Consumer<'a, S>,
     waker: Option<Waker>,
-    current_frame: Option<Result<Request<'a, S>, Error>>,
-    needed: usize,
-    frame_size: usize,
+    needed_bytes: Option<usize>,
 }
 
 impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
     pub fn new(bb: &'a BBBuffer<S>) -> Modbus<'a, S> {
-        let (producer, consumer) = bb.try_split_framed().unwrap();
+        let (producer, consumer) = bb.try_split().unwrap();
 
         Modbus {
             producer,
             consumer,
             waker: None,
-            current_frame: None,
-            needed: 0,
-            frame_size: 0,
+            needed_bytes: None,
         }
     }
 
-    fn crc_valid(data: &[u8], crc: u16) -> bool {
+    /// Returns true if the CRC matches the data.
+    ///
+    /// Expects the last two bytes of the data to be the CRC.
+    fn crc_valid(data: &[u8]) -> bool {
         crc16::State::<crc16::MODBUS>::calculate(data) == 0
     }
 
-    fn parse_read_request<'b>(input: &'b [u8]) -> IResult<&'b [u8], (u16, u16, u16)> {
-        let (input, address) = take(2usize)(input)?;
-        let (input, count) = take(2usize)(input)?;
-        let (input, crc) = take(2usize)(input)?;
+    fn parse_read_request<'b>(data: &'b [u8]) -> (u16, u16) {
+        let address: u16 = data.pread_with(0, BE).unwrap();
+        let count: u16 = data.pread_with(2, BE).unwrap();
 
-        let address: u16 = address.pread_with(0, BE).unwrap();
-        let count: u16 = count.pread_with(0, BE).unwrap();
-        let crc: u16 = crc.pread_with(0, LE).unwrap();
-
-        Ok((input, (address, count, crc)))
+        (address, count)
     }
 
-    fn parse_frame(&mut self, wgr: FrameGrantW<S>) -> Result<Request<'a, S>, Error> {
-        // let (producer, consumer) = self.buffer.try_split_framed().unwrap();
+    fn parse_frame(&mut self, rgr: GrantR<S>) -> Result<Request<'a, S>, Error> {
+        let len = parse_request_len(&rgr[..]).unwrap().unwrap();
+        let crc_valid = Self::crc_valid(&rgr[..len]);
+        if !crc_valid {
+            return Err(Error::Crc);
+        }
+        let _slave_address = rgr[0];
+        let function_id = rgr[1];
+        let data = &rgr[2..len];
 
-        // let rgr = consumer.read().unwrap();
-        // let data = &rgr[..];
-
-        let data = &wgr[..self.frame_size];
-
-        let (input, _slave_address) = take(1usize)(data)?;
-        let (input, function) = take(1usize)(input)?;
-
-        let r = match function[0] {
+        let r = match function_id {
             1 => {
-                let (_input, (address, count, crc)) = Self::parse_read_request(input)?;
-                let crc_valid = Self::crc_valid(&data[..8], crc);
-                if !crc_valid {
-                    return Err(Error::Crc);
-                }
-                wgr.commit(6);
+                let (address, count) = Self::parse_read_request(data);
                 Ok(Request::ReadCoil { address, count })
             }
             2 => {
-                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                wgr.commit(0);
+                let (address, count) = Self::parse_read_request(data);
                 Ok(Request::ReadInput { address, count })
             }
             3 => {
-                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                wgr.commit(0);
+                let (address, count) = Self::parse_read_request(data);
                 Ok(Request::ReadOutputRegisters { address, count })
             }
             4 => {
-                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                wgr.commit(0);
+                let (address, count) = Self::parse_read_request(data);
                 Ok(Request::ReadInputRegisters { address, count })
             }
             5 => {
                 // TODO:
-                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                wgr.commit(0);
+                let (address, count) = Self::parse_read_request(data);
                 Ok(Request::ReadCoil { address, count })
             }
             6 => {
                 // TODO:
-                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                wgr.commit(0);
+                let (address, count) = Self::parse_read_request(data);
                 Ok(Request::ReadCoil { address, count })
             }
             15 => {
                 // TODO:
-                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                wgr.commit(0);
+                let (address, count) = Self::parse_read_request(data);
                 let rgr = self.consumer.read().unwrap();
                 Ok(Request::SetCoils {
                     address,
@@ -202,8 +193,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
             }
             16 => {
                 // TODO:
-                let (_input, (address, count, _crc)) = Self::parse_read_request(input)?;
-                wgr.commit(0);
+                let (address, count) = Self::parse_read_request(data);
                 Ok(Request::ReadCoil { address, count })
             }
             f => Err(Error::UnknownFunction(f)),
@@ -214,44 +204,29 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
 
     /// Call this in the data received interrupt.
     pub fn on_data_received(&mut self, data: &[u8]) {
-        // Add the newly received data to the grant.
-        let mut wgr = self.producer.grant(256).unwrap();
-        wgr[self.frame_size..self.frame_size + data.len()].clone_from_slice(&data);
-        self.frame_size += data.len();
+        // Get a grant that is as large as the size of the received data.
+        let mut wgr = self.producer.grant_exact(data.len()).unwrap();
 
-        if wgr.len() >= self.needed {
-            self.needed = 0;
-        } else {
-            return;
-        }
+        // Copy the data from the receive buffer into the bbqueue.
+        wgr.clone_from_slice(&data);
 
-        match self.parse_frame(wgr) {
-            // If the frame is not complete yet, wait for more bytes.
-            Err(Error::Parse(Err::Incomplete(needed))) => match needed {
-                // Do nothing if the parser has no info about the number of required bytes.
-                Needed::Unknown => (),
-                // Remember the number of the needed bytes until we can parse the frame if the number is known.
-                // TODO: determine if this actually ever hits or if we can spare those few instructions.
-                Needed::Size(number) => self.needed = number,
-            },
-            // If we succeed to parse the frame, commit the bytes to the buffer and reset the position in the frame to 0.
-            // Then wake the waker.
-            Ok(frame) => {
-                self.current_frame = Some(Ok(frame));
+        // Make sure we commit the stored bytes.
+        wgr.commit(data.len());
+
+        // TODO: Handle wraparound.
+        let rgr = self.consumer.read().unwrap();
+        if let Some(needed_bytes) = self.needed_bytes {
+            // If we don't need anymore bytes, call the waker.
+            if rgr.len() >= needed_bytes {
                 if let Some(waker) = self.waker.take() {
-                    self.frame_size = 0;
                     waker.wake();
                 }
             }
-            // If we fail to parse the frame, do NOT commit the bytes to the buffer and reset the position in the frame to 0.
-            // This way we can reuse the frame space.
-            // Then wake the waker.
-            Err(err) => {
-                self.current_frame = Some(Err(err));
-                if let Some(waker) = self.waker.take() {
-                    waker.wake();
-                    self.frame_size = 0;
-                }
+        } else {
+            // If we do not know the amount of bytes required, make sure we still wake the poller
+            // such that it can check for the required amount.
+            if let Some(waker) = self.waker.take() {
+                waker.wake();
             }
         }
     }
@@ -261,15 +236,51 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
             bus: &'b mut Modbus<'a, S>,
         }
 
-        impl<'a: 'b, 'b, S: ArrayLength<u8>> Future for RequestFuture<'a, 'b, S> {
+        impl<'a: 'b, 'b, S: ArrayLength<u8> + 'a> Future for RequestFuture<'a, 'b, S> {
             type Output = Result<Request<'a, S>, Error>;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                if let Some(frame) = self.bus.current_frame.take() {
-                    Poll::Ready(frame)
-                } else {
-                    self.bus.waker = Some(cx.waker().clone());
-                    Poll::Pending
+                match self.bus.needed_bytes {
+                    Some(0) => {
+                        // We don't require anymore bytes to parse the next frame.
+                        // So we reset everything and parse the frame.
+
+                        // Reset needed bytes to unknown for the next frame.
+                        self.bus.needed_bytes = None;
+                        // Read the stored bytes.
+                        let rgr = self.bus.consumer.read().unwrap();
+                        // Parse and return the frame from the stored bytes.
+                        Poll::Ready(self.bus.parse_frame(rgr))
+                    }
+                    None => {
+                        self.bus.waker = Some(cx.waker().clone());
+                        // Read the stored bytes.
+                        let rgr = self.bus.consumer.read().unwrap();
+                        match parse_request_len(&rgr[..]) {
+                            Ok(len) => {
+                                // We store the number of needed bytes, whether it is known or unknown (None, Some(len)).
+                                self.bus.needed_bytes = len;
+                                // Instantly check if we can yield a new frame!
+                                if let Some(needed_bytes) = self.bus.needed_bytes {
+                                    // If we don't need anymore bytes, call the waker.
+                                    if rgr.len() >= needed_bytes {
+                                        // Parse and return the frame from the stored bytes.
+                                        return Poll::Ready(self.bus.parse_frame(rgr));
+                                    }
+                                }
+                            }
+                            // If an unknown function is encountered we cannot parse the frame length
+                            // and thus we cannot parse the entire frame.
+                            // For now we just panic here.
+                            // TODO: Implement a recovery mechanism. Maybe a timeout?
+                            Err(_e) => unimplemented!("An unknown function id was encountered; How do we handle this properly?")
+                        }
+                        Poll::Pending
+                    }
+                    Some(_) => {
+                        // Wait on for more bytes.
+                        Poll::Pending
+                    }
                 }
             }
         }
@@ -278,24 +289,36 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
     }
 }
 
-#[derive(Error, Debug, PartialEq)]
-pub enum Error {
-    #[error("CRC could not be validated")]
-    Crc,
-    #[error("Message could not be parsed")]
-    Parse(nom::Err<nom::error::ErrorKind>),
-    #[error("Unknown function: {0}")]
-    UnknownFunction(u8),
+/// Returns the complete length of a request dataframe including slave ID and CRC.
+/// The returned Result is always Ok except if the function code was unknown.
+/// If there was not enough databytes received yet, Ok(None) is returned.
+fn parse_request_len(data: &[u8]) -> Result<Option<usize>, Error> {
+    // If the packet is not at least two bytes long, we cannot determine the function code
+    // as well as the packet length, so we instanly return None, signaling that we await more bytes.
+    if data.len() < 2 {
+        return Ok(None);
+    }
+    let fn_code = data[1];
+    Ok(match fn_code {
+        consts::READ_COIL..=consts::SET_REGISTER => Some(8),
+        consts::SET_COILS | consts::SET_REGISTERS => {
+            if data.len() > 6 {
+                Some(9 + data[6] as usize)
+            } else {
+                // incomplete frame
+                None
+            }
+        }
+        _ => {
+            return Err(Error::UnknownFunction(fn_code));
+        }
+    })
 }
 
-impl From<nom::Err<(&[u8], nom::error::ErrorKind)>> for Error {
-    fn from(e: nom::Err<(&[u8], nom::error::ErrorKind)>) -> Self {
-        Error::Parse(match e {
-            nom::Err::Error((_r, e)) => nom::Err::Error(e),
-            nom::Err::Failure((_r, e)) => nom::Err::Failure(e),
-            nom::Err::Incomplete(e) => nom::Err::Incomplete(e),
-        })
-    }
+#[derive(Debug, PartialEq)]
+pub enum Error {
+    Crc,
+    UnknownFunction(u8),
 }
 
 #[cfg(test)]
