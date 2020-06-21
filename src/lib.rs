@@ -1,4 +1,4 @@
-#![no_std]
+// #![no_std]
 mod consts;
 
 #[cfg(feature = "atomic")]
@@ -186,16 +186,24 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
                 Ok(Request::ReadInputRegisters { address, count })
             }
             5 => {
-                // TODO:
-                let (address, count) = Self::parse_read_request(data);
+                // We use `parse_read_request` even tho it's not the classic read request.
+                // But the function code 0x05 has the same format.
+                let (address, status) = Self::parse_read_request(data);
                 rgr.release(frame_len);
-                Ok(Request::ReadCoil { address, count })
+                Ok(Request::SetCoil {
+                    address,
+                    status: if status == 0xFF00 {
+                        CoilState::On
+                    } else {
+                        // We assume that if the status was not 0xFF00 it was 0x0000 as expected.
+                        CoilState::Off
+                    },
+                })
             }
             6 => {
-                // TODO:
-                let (address, count) = Self::parse_read_request(data);
+                let (address, value) = Self::parse_read_request(data);
                 rgr.release(frame_len);
-                Ok(Request::ReadCoil { address, count })
+                Ok(Request::SetRegister { address, value })
             }
             15 => {
                 // TODO:
@@ -348,7 +356,7 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, Modbus, Request};
+    use super::{CoilState, Error, Modbus, Request};
     use bbqueue::{atomic::consts::U2048, BBBuffer};
 
     #[tokio::test]
@@ -424,65 +432,110 @@ mod tests {
         );
     }
 
-    // #[test]
-    // fn fn2() {
-    //     let data = [0x11, 0x02, 0x00, 0xC4, 0x00, 0x16, 0xBA, 0xA9];
-    //     let slave_address = 0x11;
-    //     let fn_code = 0x02;
-    //     let address = 0x00C4;
-    //     let count = 0x0016;
-    //     let crc = 0xBAA9;
-    // }
+    #[tokio::test]
+    async fn fn2() {
+        let bb = BBBuffer::<U2048>::new();
+        let mut modbus = super::Modbus::new(&bb);
 
-    // #[test]
-    // fn fn3() {
-    //     let data = [0x11, 0x03, 0x00, 0x6B, 0x00, 0x03, 0x76, 0x87];
-    //     let slave_address = 0x11;
-    //     let fn_code = 0x03;
-    //     let address = 0x006B;
-    //     let count = 0x0003;
-    //     let crc = 0x7687;
-    // }
+        let data = [0x11, 0x02, 0x00, 0xC4, 0x00, 0x16, 0xBA, 0xA9];
+        let address = 0x00C4;
+        let count = 0x0016;
 
-    // #[test]
-    // fn fn4() {
-    //     let data = [0x11, 0x04, 0x00, 0x08, 0x00, 0x01, 0xB2, 0x98];
-    //     let slave_address = 0x11;
-    //     let fn_code = 0x04;
-    //     let address = 0x0008;
-    //     let count = 0x0001;
-    //     let crc = 0xB298;
-    // }
+        modbus.on_data_received(&data);
+        assert_eq!(
+            modbus.next().await,
+            Ok(Request::ReadInput { address, count })
+        );
+    }
 
-    // #[test]
-    // fn fn5_on() {
-    //     let data = [0x11, 0x05, 0x00, 0xAC, 0xFF, 0x00, 0x4E, 0x8B];
-    //     let slave_address = 0x11;
-    //     let fn_code = 0x05;
-    //     let address = 0x00AC;
-    //     let status = true;
-    //     let crc = 0x4E8B;
-    // }
+    #[tokio::test]
+    async fn fn3() {
+        let bb = BBBuffer::<U2048>::new();
+        let mut modbus = super::Modbus::new(&bb);
 
-    // #[test]
-    // fn fn5_off() {
-    //     let data = [0x11, 0x05, 0x00, 0xAC, 0x00, 0xFF, 0x4E, 0x8B];
-    //     let slave_address = 0x11;
-    //     let fn_code = 0x05;
-    //     let address = 0x00AC;
-    //     let status = false;
-    //     let crc = 0x4E8B;
-    // }
+        let data = [0x11, 0x03, 0x00, 0x6B, 0x00, 0x03, 0x76, 0x87];
 
-    // #[test]
-    // fn fn6() {
-    //     let data = [0x11, 0x06, 0x00, 0x01 0003 9A9B];
-    //     let slave_address = 0x11;
-    //     let fn_code = 0x06;
-    //     let address = 0x0001;
-    //     let count = 0x0025;
-    //     let crc = 0x9A9B;
-    // }
+        let address = 0x006B;
+        let count = 0x0003;
+
+        modbus.on_data_received(&data);
+        assert_eq!(
+            modbus.next().await,
+            Ok(Request::ReadOutputRegisters { address, count })
+        );
+    }
+
+    #[tokio::test]
+    async fn fn4() {
+        let bb = BBBuffer::<U2048>::new();
+        let mut modbus = super::Modbus::new(&bb);
+
+        let data = [0x11, 0x04, 0x00, 0x08, 0x00, 0x01, 0xB2, 0x98];
+
+        let address = 0x0008;
+        let count = 0x0001;
+
+        modbus.on_data_received(&data);
+        assert_eq!(
+            modbus.next().await,
+            Ok(Request::ReadInputRegisters { address, count })
+        );
+    }
+
+    #[tokio::test]
+    async fn fn5_on() {
+        let bb = BBBuffer::<U2048>::new();
+        let mut modbus = super::Modbus::new(&bb);
+
+        let data = [0x11, 0x05, 0x00, 0xAC, 0xFF, 0x00, 0x4E, 0x8B];
+
+        let address = 0x00AC;
+
+        modbus.on_data_received(&data);
+        assert_eq!(
+            modbus.next().await,
+            Ok(Request::SetCoil {
+                address,
+                status: CoilState::On
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn fn5_off() {
+        let bb = BBBuffer::<U2048>::new();
+        let mut modbus = super::Modbus::new(&bb);
+
+        let data = [0x11, 0x05, 0x00, 0xAC, 0x00, 0xFF, 0x4F, 0x3B];
+
+        let address = 0x00AC;
+
+        modbus.on_data_received(&data);
+        assert_eq!(
+            modbus.next().await,
+            Ok(Request::SetCoil {
+                address,
+                status: CoilState::Off
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn fn6() {
+        let bb = BBBuffer::<U2048>::new();
+        let mut modbus = super::Modbus::new(&bb);
+
+        let data = [0x11, 0x06, 0x00, 0x01, 0x00, 0x03, 0x9A, 0x9B];
+
+        let address = 0x0001;
+        let value = 0x0003;
+
+        modbus.on_data_received(&data);
+        assert_eq!(
+            modbus.next().await,
+            Ok(Request::SetRegister { address, value })
+        );
+    }
 
     // #[test]
     // fn fn15() {
