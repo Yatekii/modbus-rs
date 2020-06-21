@@ -23,18 +23,22 @@ pub enum CoilState {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct CoilStore<'a, S: ArrayLength<u8>>(GrantR<'a, S>);
+pub struct CoilStore<'a, S: ArrayLength<u8>> {
+    data: GrantR<'a, S>,
+    count: usize,
+}
 
 impl<'a, S: ArrayLength<u8>> CoilStore<'a, S> {
     pub fn iter(&'a self) -> CoilIterator<'a> {
         CoilIterator {
             current: 0,
-            coils: &self.0,
+            data: &self.data[0..(self.count + (8 - 1)) / 8],
+            count: self.count,
         }
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.count
     }
 }
 
@@ -45,24 +49,26 @@ impl<'a, S: ArrayLength<u8>> IntoIterator for &'a CoilStore<'a, S> {
     fn into_iter(self) -> Self::IntoIter {
         CoilIterator {
             current: 0,
-            coils: &self.0,
+            data: &self.data,
+            count: self.count,
         }
     }
 }
 
 pub struct CoilIterator<'a> {
     current: usize,
-    coils: &'a [u8],
+    data: &'a [u8],
+    count: usize,
 }
 
 impl<'a> Iterator for CoilIterator<'a> {
     type Item = CoilState;
     fn next(&mut self) -> Option<Self::Item> {
-        let byte = self.current / 8;
-        let bit = self.current % 8;
-        if byte < self.coils.len() {
+        if self.current < self.count {
+            let byte = self.current / 8;
+            let bit = self.current % 8;
             self.current += 1;
-            Some(if self.coils[byte] >> bit & 1 == 1 {
+            Some(if self.data[byte] >> bit & 1 == 1 {
                 CoilState::On
             } else {
                 CoilState::Off
@@ -145,58 +151,68 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
         (address, count)
     }
 
-    fn parse_frame(&mut self, rgr: GrantR<S>) -> Result<Request<'a, S>, Error> {
-        let len = parse_request_len(&rgr[..])
-            .unwrap_or_else(|_| panic!())
-            .unwrap_or_else(|| panic!());
-        let crc_valid = Self::crc_valid(&rgr[..len]);
+    fn parse_frame(
+        &mut self,
+        rgr: GrantR<'a, S>,
+        frame_len: usize,
+    ) -> Result<Request<'a, S>, Error> {
+        let crc_valid = Self::crc_valid(&rgr[..frame_len]);
         if !crc_valid {
             return Err(Error::Crc);
         }
         let _slave_address = rgr[0];
         let function_id = rgr[1];
-        let data = &rgr[2..len];
+        let data = &rgr[2..frame_len];
 
         let r = match function_id {
             1 => {
                 let (address, count) = Self::parse_read_request(data);
+                rgr.release(frame_len);
                 Ok(Request::ReadCoil { address, count })
             }
             2 => {
                 let (address, count) = Self::parse_read_request(data);
+                rgr.release(frame_len);
                 Ok(Request::ReadInput { address, count })
             }
             3 => {
                 let (address, count) = Self::parse_read_request(data);
+                rgr.release(frame_len);
                 Ok(Request::ReadOutputRegisters { address, count })
             }
             4 => {
                 let (address, count) = Self::parse_read_request(data);
+                rgr.release(frame_len);
                 Ok(Request::ReadInputRegisters { address, count })
             }
             5 => {
                 // TODO:
                 let (address, count) = Self::parse_read_request(data);
+                rgr.release(frame_len);
                 Ok(Request::ReadCoil { address, count })
             }
             6 => {
                 // TODO:
                 let (address, count) = Self::parse_read_request(data);
+                rgr.release(frame_len);
                 Ok(Request::ReadCoil { address, count })
             }
             15 => {
                 // TODO:
                 let (address, count) = Self::parse_read_request(data);
-                let rgr = self.consumer.read().unwrap_or_else(|_| panic!());
                 Ok(Request::SetCoils {
                     address,
                     count,
-                    coils: CoilStore(rgr),
+                    coils: CoilStore {
+                        data: rgr,
+                        count: count as usize,
+                    },
                 })
             }
             16 => {
                 // TODO:
                 let (address, count) = Self::parse_read_request(data);
+                rgr.release(frame_len);
                 Ok(Request::ReadCoil { address, count })
             }
             f => Err(Error::UnknownFunction(f)),
@@ -247,16 +263,22 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
                 match self.bus.needed_bytes {
-                    Some(0) => {
-                        // We don't require anymore bytes to parse the next frame.
-                        // So we reset everything and parse the frame.
-
-                        // Reset needed bytes to unknown for the next frame.
-                        self.bus.needed_bytes = None;
+                    Some(frame_len) => {
                         // Read the stored bytes.
                         let rgr = self.bus.consumer.read().unwrap_or_else(|_| panic!());
-                        // Parse and return the frame from the stored bytes.
-                        Poll::Ready(self.bus.parse_frame(rgr))
+
+                        if rgr.len() >= frame_len {
+                            // We don't require anymore bytes to parse the next frame.
+                            // So we reset everything and parse the frame.
+
+                            // Reset needed bytes to unknown for the next frame.
+                            self.bus.needed_bytes = None;
+                            // Parse and return the frame from the stored bytes.
+                            Poll::Ready(self.bus.parse_frame(rgr, frame_len))
+                        } else {
+                            // Wait on for more bytes.
+                            Poll::Pending
+                        }
                     }
                     None => {
                         self.bus.waker = Some(cx.waker().clone());
@@ -267,11 +289,12 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
                                 // We store the number of needed bytes, whether it is known or unknown (None, Some(len)).
                                 self.bus.needed_bytes = len;
                                 // Instantly check if we can yield a new frame!
-                                if let Some(needed_bytes) = self.bus.needed_bytes {
+                                if let Some(frame_len) = self.bus.needed_bytes {
                                     // If we don't need anymore bytes, call the waker.
-                                    if rgr.len() >= needed_bytes {
+                                    if rgr.len() >= frame_len {
+                                        // self.bus.needed_bytes = None;
                                         // Parse and return the frame from the stored bytes.
-                                        return Poll::Ready(self.bus.parse_frame(rgr));
+                                        return Poll::Ready(self.bus.parse_frame(rgr, frame_len));
                                     }
                                 }
                             }
@@ -281,10 +304,6 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
                             // TODO: Implement a recovery mechanism. Maybe a timeout?
                             Err(_e) => unimplemented!("An unknown function id was encountered; How do we handle this properly?")
                         }
-                        Poll::Pending
-                    }
-                    Some(_) => {
-                        // Wait on for more bytes.
                         Poll::Pending
                     }
                 }
@@ -378,12 +397,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn fn1_2_futures_data_in_2_steps() {
         let bb = BBBuffer::<U2048>::new();
         let mut modbus = super::Modbus::new(&bb);
 
-        let data = [0x11, 0x01, 0x00, 0x13];
         let address: u16 = 0x0013;
         let count: u16 = 0x0025;
 
@@ -407,55 +424,55 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fn2() {
-        let data = [0x11, 0x02, 0x00, 0xC4, 0x00, 0x16, 0xBA, 0xA9];
-        let slave_address = 0x11;
-        let fn_code = 0x02;
-        let address = 0x00C4;
-        let count = 0x0016;
-        let crc = 0xBAA9;
-    }
+    // #[test]
+    // fn fn2() {
+    //     let data = [0x11, 0x02, 0x00, 0xC4, 0x00, 0x16, 0xBA, 0xA9];
+    //     let slave_address = 0x11;
+    //     let fn_code = 0x02;
+    //     let address = 0x00C4;
+    //     let count = 0x0016;
+    //     let crc = 0xBAA9;
+    // }
 
-    #[test]
-    fn fn3() {
-        let data = [0x11, 0x03, 0x00, 0x6B, 0x00, 0x03, 0x76, 0x87];
-        let slave_address = 0x11;
-        let fn_code = 0x03;
-        let address = 0x006B;
-        let count = 0x0003;
-        let crc = 0x7687;
-    }
+    // #[test]
+    // fn fn3() {
+    //     let data = [0x11, 0x03, 0x00, 0x6B, 0x00, 0x03, 0x76, 0x87];
+    //     let slave_address = 0x11;
+    //     let fn_code = 0x03;
+    //     let address = 0x006B;
+    //     let count = 0x0003;
+    //     let crc = 0x7687;
+    // }
 
-    #[test]
-    fn fn4() {
-        let data = [0x11, 0x04, 0x00, 0x08, 0x00, 0x01, 0xB2, 0x98];
-        let slave_address = 0x11;
-        let fn_code = 0x04;
-        let address = 0x0008;
-        let count = 0x0001;
-        let crc = 0xB298;
-    }
+    // #[test]
+    // fn fn4() {
+    //     let data = [0x11, 0x04, 0x00, 0x08, 0x00, 0x01, 0xB2, 0x98];
+    //     let slave_address = 0x11;
+    //     let fn_code = 0x04;
+    //     let address = 0x0008;
+    //     let count = 0x0001;
+    //     let crc = 0xB298;
+    // }
 
-    #[test]
-    fn fn5_on() {
-        let data = [0x11, 0x05, 0x00, 0xAC, 0xFF, 0x00, 0x4E, 0x8B];
-        let slave_address = 0x11;
-        let fn_code = 0x05;
-        let address = 0x00AC;
-        let status = true;
-        let crc = 0x4E8B;
-    }
+    // #[test]
+    // fn fn5_on() {
+    //     let data = [0x11, 0x05, 0x00, 0xAC, 0xFF, 0x00, 0x4E, 0x8B];
+    //     let slave_address = 0x11;
+    //     let fn_code = 0x05;
+    //     let address = 0x00AC;
+    //     let status = true;
+    //     let crc = 0x4E8B;
+    // }
 
-    #[test]
-    fn fn5_off() {
-        let data = [0x11, 0x05, 0x00, 0xAC, 0x00, 0xFF, 0x4E, 0x8B];
-        let slave_address = 0x11;
-        let fn_code = 0x05;
-        let address = 0x00AC;
-        let status = false;
-        let crc = 0x4E8B;
-    }
+    // #[test]
+    // fn fn5_off() {
+    //     let data = [0x11, 0x05, 0x00, 0xAC, 0x00, 0xFF, 0x4E, 0x8B];
+    //     let slave_address = 0x11;
+    //     let fn_code = 0x05;
+    //     let address = 0x00AC;
+    //     let status = false;
+    //     let crc = 0x4E8B;
+    // }
 
     // #[test]
     // fn fn6() {
