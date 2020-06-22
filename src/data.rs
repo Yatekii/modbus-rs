@@ -21,7 +21,7 @@ impl<'a, S: ArrayLength<u8>> CoilStore<'a, S> {
     pub fn iter(&'a self) -> CoilIterator<'a> {
         CoilIterator {
             current: 0,
-            data: &self.data[6..(self.count + (8 - 1)) / 8],
+            data: &self.data[7..7 + (self.count + (8 - 1)) / 8],
             count: self.count,
         }
     }
@@ -36,11 +36,7 @@ impl<'a, S: ArrayLength<u8>> IntoIterator for &'a CoilStore<'a, S> {
     type IntoIter = CoilIterator<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        CoilIterator {
-            current: 0,
-            data: &self.data,
-            count: self.count,
-        }
+        self.iter()
     }
 }
 
@@ -57,7 +53,7 @@ impl<'a> Iterator for CoilIterator<'a> {
             let byte = self.current / 8;
             let bit = self.current % 8;
             self.current += 1;
-            Some(if self.data[byte] >> bit & 1 == 1 {
+            Some(if (self.data[byte] >> bit) & 1 == 1 {
                 CoilState::On
             } else {
                 CoilState::Off

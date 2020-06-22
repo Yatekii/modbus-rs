@@ -341,15 +341,53 @@ mod tests {
         );
     }
 
-    // #[test]
-    // fn fn15() {
-    //     let data = [11 0F 0013 000A 02 CD01 BF0B];
-    //     let slave_address = 0x11;
-    //     let fn_code = 0x0F;
-    //     let address = 0x0013;
-    //     let count = 0x0025;
-    //     let crc = 0xBF0B;
-    // }
+    #[tokio::test]
+    async fn fn15() {
+        let bb = BBBuffer::<U2048>::new();
+        let mut modbus = super::Modbus::new(&bb);
+        let data = [
+            0x11, 0x0F, 0x00, 0x13, 0x00, 0x0A, 0x02, 0xCD, 0x01, 0xBF, 0x0B,
+        ];
+
+        let address_set = 0x0013;
+        let count_set = 0x000A;
+
+        modbus.on_data_received(&data);
+        let frame = modbus.next().await;
+
+        match frame {
+            Ok(RequestFrame {
+                slave_id: 0x11,
+                request:
+                    Request::SetCoils {
+                        address,
+                        count,
+                        coils,
+                    },
+            }) => {
+                assert_eq!(address_set, address);
+                assert_eq!(count_set, count);
+
+                let coils = coils.iter().collect::<Vec<_>>();
+                assert_eq!(
+                    coils,
+                    vec![
+                        CoilState::On,
+                        CoilState::Off,
+                        CoilState::On,
+                        CoilState::On,
+                        CoilState::Off,
+                        CoilState::Off,
+                        CoilState::On,
+                        CoilState::On,
+                        CoilState::On,
+                        CoilState::Off
+                    ]
+                );
+            }
+            _ => panic!("Unexpected request result."),
+        }
+    }
 
     // #[test]
     // fn fn16() {
