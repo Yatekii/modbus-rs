@@ -1,6 +1,11 @@
+#[cfg(feature = "atomic")]
+use bbqueue::atomic::BBBuffer;
+#[cfg(not(feature = "atomic"))]
+use bbqueue::cm_mutex::BBBuffer;
+
 use crate::error::Error;
-use crate::request::Request;
-use bbqueue::{ArrayLength, BBBuffer, Consumer, Producer};
+use crate::request::RequestFrame;
+use bbqueue::{ArrayLength, Consumer, Producer};
 use core::{
     pin::Pin,
     task::{Context, Waker},
@@ -58,13 +63,13 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
         }
     }
 
-    pub async fn next(&mut self) -> Result<Request<'_, S>, Error> {
+    pub async fn next(&mut self) -> Result<RequestFrame<'_, S>, Error> {
         struct RequestFuture<'a: 'b, 'b, S: ArrayLength<u8>> {
             bus: &'b mut Modbus<'a, S>,
         }
 
         impl<'a: 'b, 'b, S: ArrayLength<u8> + 'a> Future for RequestFuture<'a, 'b, S> {
-            type Output = Result<Request<'a, S>, Error>;
+            type Output = Result<RequestFrame<'a, S>, Error>;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
                 match self.bus.needed_bytes {
@@ -81,7 +86,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
                             // Reset needed bytes to unknown for the next frame.
                             self.bus.needed_bytes = None;
                             // Parse and return the frame from the stored bytes.
-                            Poll::Ready(Request::parse_frame(rgr, frame_len))
+                            Poll::Ready(RequestFrame::parse_frame(rgr, frame_len))
                         } else {
                             // Wait on for more bytes.
                             Poll::Pending
@@ -91,7 +96,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
                         self.bus.waker = Some(cx.waker().clone());
                         // Read the stored bytes.
                         let rgr = self.bus.consumer.read().unwrap_or_else(|_| panic!());
-                        match Request::<S>::parse_request_len(&rgr[..]) {
+                        match RequestFrame::<S>::parse_request_len(&rgr[..]) {
                             Ok(len) => {
                                 // We store the number of needed bytes, whether it is known or unknown (None, Some(len)).
                                 self.bus.needed_bytes = len;
@@ -103,7 +108,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
                                         // Parse and return the frame from the stored bytes.
                                         let mut rgr = rgr.into_auto_release();
                                         rgr.to_release(frame_len);
-                                        return Poll::Ready(Request::parse_frame(rgr, frame_len));
+                                        return Poll::Ready(RequestFrame::parse_frame(rgr, frame_len));
                                     }
                                 }
                             }
@@ -125,7 +130,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{CoilState, Error, Modbus, Request};
+    use crate::{CoilState, Error, Modbus, Request, RequestFrame};
     use bbqueue::{atomic::consts::U2048, BBBuffer};
 
     #[tokio::test]
@@ -140,7 +145,10 @@ mod tests {
         modbus.on_data_received(&data);
         assert_eq!(
             modbus.next().await,
-            Ok(Request::ReadCoil { address, count })
+            Ok(RequestFrame {
+                slave_id: 0x11,
+                request: Request::ReadCoil { address, count }
+            })
         );
     }
 
@@ -169,7 +177,10 @@ mod tests {
         modbus.on_data_received(&data);
         assert_eq!(
             modbus.next().await,
-            Ok(Request::ReadCoil { address, count })
+            Ok(RequestFrame {
+                slave_id: 0x11,
+                request: Request::ReadCoil { address, count }
+            })
         );
     }
 
@@ -193,11 +204,17 @@ mod tests {
 
         assert_eq!(
             modbus.next().await,
-            Ok(Request::ReadCoil { address, count })
+            Ok(RequestFrame {
+                slave_id: 0x11,
+                request: Request::ReadCoil { address, count }
+            })
         );
         assert_eq!(
             modbus.next().await,
-            Ok(Request::ReadCoil { address, count })
+            Ok(RequestFrame {
+                slave_id: 0x11,
+                request: Request::ReadCoil { address, count }
+            })
         );
     }
 
@@ -213,7 +230,10 @@ mod tests {
         modbus.on_data_received(&data);
         assert_eq!(
             modbus.next().await,
-            Ok(Request::ReadInput { address, count })
+            Ok(RequestFrame {
+                slave_id: 0x11,
+                request: Request::ReadInput { address, count }
+            })
         );
     }
 
@@ -230,7 +250,10 @@ mod tests {
         modbus.on_data_received(&data);
         assert_eq!(
             modbus.next().await,
-            Ok(Request::ReadOutputRegisters { address, count })
+            Ok(RequestFrame {
+                slave_id: 0x11,
+                request: Request::ReadOutputRegisters { address, count }
+            })
         );
     }
 
@@ -247,7 +270,10 @@ mod tests {
         modbus.on_data_received(&data);
         assert_eq!(
             modbus.next().await,
-            Ok(Request::ReadInputRegisters { address, count })
+            Ok(RequestFrame {
+                slave_id: 0x11,
+                request: Request::ReadInputRegisters { address, count }
+            })
         );
     }
 
@@ -263,9 +289,12 @@ mod tests {
         modbus.on_data_received(&data);
         assert_eq!(
             modbus.next().await,
-            Ok(Request::SetCoil {
-                address,
-                status: CoilState::On
+            Ok(RequestFrame {
+                slave_id: 0x11,
+                request: Request::SetCoil {
+                    address,
+                    status: CoilState::On
+                }
             })
         );
     }
@@ -282,9 +311,12 @@ mod tests {
         modbus.on_data_received(&data);
         assert_eq!(
             modbus.next().await,
-            Ok(Request::SetCoil {
-                address,
-                status: CoilState::Off
+            Ok(RequestFrame {
+                slave_id: 0x11,
+                request: Request::SetCoil {
+                    address,
+                    status: CoilState::Off
+                }
             })
         );
     }
@@ -302,7 +334,10 @@ mod tests {
         modbus.on_data_received(&data);
         assert_eq!(
             modbus.next().await,
-            Ok(Request::SetRegister { address, value })
+            Ok(RequestFrame {
+                slave_id: 0x11,
+                request: Request::SetRegister { address, value }
+            })
         );
     }
 

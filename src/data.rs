@@ -21,7 +21,7 @@ impl<'a, S: ArrayLength<u8>> CoilStore<'a, S> {
     pub fn iter(&'a self) -> CoilIterator<'a> {
         CoilIterator {
             current: 0,
-            data: &self.data[0..(self.count + (8 - 1)) / 8],
+            data: &self.data[6..(self.count + (8 - 1)) / 8],
             count: self.count,
         }
     }
@@ -79,7 +79,7 @@ impl<'a, S: ArrayLength<u8>> RegisterStore<'a, S> {
     }
 
     pub fn iter(&'a self) -> impl Iterator<Item = u16> + 'a {
-        self.data
+        self.data[6..]
             .chunks(2)
             .map(|s| u16::from_be_bytes(s.try_into().unwrap_or_default()))
     }
