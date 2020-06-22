@@ -5,7 +5,7 @@ mod consts;
 use bbqueue::atomic::BBBuffer;
 #[cfg(not(feature = "atomic"))]
 use bbqueue::cm_mutex::BBBuffer;
-use bbqueue::{ArrayLength, Consumer, GrantR, Producer};
+use bbqueue::{ArrayLength, AutoReleaseGrantR, Consumer, Producer};
 use core::convert::TryInto;
 use core::{
     pin::Pin,
@@ -24,7 +24,7 @@ pub enum CoilState {
 
 #[derive(Debug, PartialEq)]
 pub struct CoilStore<'a, S: ArrayLength<u8>> {
-    data: GrantR<'a, S>,
+    data: AutoReleaseGrantR<'a, S>,
     count: usize,
 }
 
@@ -80,6 +80,23 @@ impl<'a> Iterator for CoilIterator<'a> {
 }
 
 #[derive(Debug, PartialEq)]
+pub struct RegisterStore<'a, S: ArrayLength<u8>> {
+    data: AutoReleaseGrantR<'a, S>,
+}
+
+impl<'a, S: ArrayLength<u8>> RegisterStore<'a, S> {
+    pub fn iter(&'a self) -> impl Iterator<Item = u16> + 'a {
+        self.data
+            .chunks(2)
+            .map(|s| u16::from_be_bytes(s.try_into().unwrap_or_default()))
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len() / 2
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub enum Request<'a, S: ArrayLength<u8>> {
     ReadCoil {
         address: u16,
@@ -113,7 +130,7 @@ pub enum Request<'a, S: ArrayLength<u8>> {
     SetRegisters {
         address: u16,
         count: u16,
-        registers: &'a [u16],
+        registers: RegisterStore<'a, S>,
     },
 }
 
@@ -153,7 +170,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
 
     fn parse_frame(
         &mut self,
-        rgr: GrantR<'a, S>,
+        rgr: AutoReleaseGrantR<'a, S>,
         frame_len: usize,
     ) -> Result<Request<'a, S>, Error> {
         let crc_valid = Self::crc_valid(&rgr[..frame_len]);
@@ -206,7 +223,6 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
                 Ok(Request::SetRegister { address, value })
             }
             15 => {
-                // TODO:
                 let (address, count) = Self::parse_read_request(data);
                 Ok(Request::SetCoils {
                     address,
@@ -218,10 +234,12 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
                 })
             }
             16 => {
-                // TODO:
                 let (address, count) = Self::parse_read_request(data);
-                rgr.release(frame_len);
-                Ok(Request::ReadCoil { address, count })
+                Ok(Request::SetRegisters {
+                    address,
+                    count,
+                    registers: RegisterStore { data: rgr },
+                })
             }
             f => Err(Error::UnknownFunction(f)),
         };
@@ -274,6 +292,8 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
                     Some(frame_len) => {
                         // Read the stored bytes.
                         let rgr = self.bus.consumer.read().unwrap_or_else(|_| panic!());
+                        let mut rgr = rgr.into_auto_release();
+                        rgr.to_release(frame_len);
 
                         if rgr.len() >= frame_len {
                             // We don't require anymore bytes to parse the next frame.
@@ -300,8 +320,10 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
                                 if let Some(frame_len) = self.bus.needed_bytes {
                                     // If we don't need anymore bytes, call the waker.
                                     if rgr.len() >= frame_len {
-                                        // self.bus.needed_bytes = None;
+                                        self.bus.needed_bytes = None;
                                         // Parse and return the frame from the stored bytes.
+                                        let mut rgr = rgr.into_auto_release();
+                                        rgr.to_release(frame_len);
                                         return Poll::Ready(self.bus.parse_frame(rgr, frame_len));
                                     }
                                 }
