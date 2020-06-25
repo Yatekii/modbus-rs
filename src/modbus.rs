@@ -42,7 +42,7 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
         // This is a bit wasteful with memory but guarantees no fragmentation.
         let mut wgr = self
             .producer
-            .grant_exact(self.needed_bytes.unwrap_or(0) + 256)
+            .grant_exact(data.len())
             .unwrap_or_else(|_| panic!());
 
         // Copy the data from the receive buffer into the bbqueue.
@@ -395,13 +395,37 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn fn16() {
-    //     let data = [11 10 0001 0002 04 000A 0102 C6F0];
-    //     let slave_address = 0x11;
-    //     let fn_code = 0x10;
-    //     let address = 0x0013;
-    //     let count = 0x0025;
-    //     let crc = 0x0E84;
-    // }
+    #[tokio::test]
+    async fn fn16() {
+        let bb = BBBuffer::<U2048>::new();
+        let mut modbus = super::Modbus::new(&bb);
+        let data = [
+            0x11, 0x10, 0x00, 0x01, 0x00, 0x02, 0x04, 0x00, 0x0A, 0x01, 0x02, 0xC6, 0xF0,
+        ];
+
+        let address_set = 0x0001;
+        let count_set = 0x0002;
+
+        modbus.on_data_received(&data);
+        let frame = modbus.next().await;
+
+        match frame {
+            Ok(RequestFrame {
+                slave_id: 0x11,
+                request:
+                    Request::SetRegisters {
+                        address,
+                        count,
+                        registers,
+                    },
+            }) => {
+                assert_eq!(address_set, address);
+                assert_eq!(count_set, count);
+
+                let registers = registers.iter().collect::<Vec<_>>();
+                assert_eq!(registers, vec![0x000A, 0x0102]);
+            }
+            _ => panic!("Unexpected request result."),
+        }
+    }
 }

@@ -75,7 +75,7 @@ impl<'a, S: ArrayLength<u8>> RegisterStore<'a, S> {
     }
 
     pub fn iter(&'a self) -> impl Iterator<Item = u16> + 'a {
-        self.data[6..]
+        self.data[7..self.data.len() - 2]
             .chunks(2)
             .map(|s| u16::from_be_bytes(s.try_into().unwrap_or_default()))
     }
