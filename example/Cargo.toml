@@ -8,11 +8,14 @@ edition = "2018"
 
 [dependencies]
 modbus-rs = { path = "../" }
-bbqueue = "0.4.8"
+bbqueue = { version = "0.4.8", git = "https://github.com/Yatekii/bbqueue.git" }
 cortex-m = "0.6.2"
 cortex-m-rt = "0.6.12"
-panic-rtt-core = "0.1.1"
+panic-rtt-target = { version = "0.1", features = ["cortex-m"] }
+rtt-target = { version = "0.2", features = ["cortex-m"] }
 async-embedded = { git = "https://github.com/rust-embedded-community/async-on-embedded.git" }
+nrf52840-dk-bsp = { git = "https://github.com/nrf-rs/nRF52840-DK.git" }
+embedded-hal = "0.2.3"
 
 [profile.dev]
 codegen-units = 1

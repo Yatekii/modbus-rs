@@ -2,6 +2,12 @@
 # It is not intended for manual editing.
 [[package]]
 name = "aligned"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d39da9b88ae1a81c03c9c082b8db83f1d0e93914126041962af61034ab44c4a5"
+
+[[package]]
+name = "aligned"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eb1ce8b3382016136ab1d31a1b5ce807144f8b7eb2d5f16b2108f0f07edceb94"
@@ -25,7 +31,7 @@ name = "async-embedded"
 version = "0.0.0-alpha.0"
 source = "git+https://github.com/rust-embedded-community/async-on-embedded.git#17aa0f6ef1f1e3639acbce28093c6c30aacaf2c9"
 dependencies = [
- "cortex-m",
+ "cortex-m 0.6.2",
  "cortex-m-udf",
  "generic-array 0.14.2",
  "heapless",
@@ -46,8 +52,7 @@ dependencies = [
 [[package]]
 name = "bbqueue"
 version = "0.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27d38cf39fda7785da8cf182cff9b2195f8b85b0d2d578a4c5d7f322b2158e82"
+source = "git+https://github.com/Yatekii/bbqueue.git#715b791557ea988fa47af89f1274a61428b4eb0b"
 dependencies = [
  "generic-array 0.13.2",
 ]
@@ -65,12 +70,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08c48aae112d48ed9f069b33538ea9e3e90aa263cfa3d1c24309612b1f7472de"
 
 [[package]]
+name = "cast"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b9434b9a5aa1450faa3f9cb14ea0e8c53bb5d2b3c1bfd1ab4fc03e9f33fbfb0"
+dependencies = [
+ "rustc_version",
+]
+
+[[package]]
+name = "cortex-m"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c0b159a1e8306949579de3698c841dba58058197b65c60807194e4fa1e7a554"
+dependencies = [
+ "aligned 0.2.0",
+ "bare-metal",
+ "cortex-m 0.6.2",
+ "volatile-register",
+]
+
+[[package]]
 name = "cortex-m"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2954942fbbdd49996704e6f048ce57567c3e1a4e2dc59b41ae9fde06a01fc763"
 dependencies = [
- "aligned",
+ "aligned 0.3.2",
  "bare-metal",
  "volatile-register",
 ]
@@ -108,15 +134,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "338089f42c427b86394a5ee60ff321da23a5c89c9d89514c829687b26359fcff"
 
 [[package]]
+name = "embedded-hal"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa998ce59ec9765d15216393af37a58961ddcefb14c753b4816ba2191d865fcb"
+dependencies = [
+ "nb",
+ "void",
+]
+
+[[package]]
 name = "example"
 version = "0.1.0"
 dependencies = [
  "async-embedded",
  "bbqueue",
- "cortex-m",
+ "cortex-m 0.6.2",
  "cortex-m-rt",
+ "embedded-hal",
  "modbus-rs",
- "panic-rtt-core",
+ "nrf52840-dk-bsp",
+ "panic-rtt-target",
+ "rtt-target 0.2.0",
+]
+
+[[package]]
+name = "fpa"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f074479d683e5a8fd0bf1251d0a5d91b0d9178b867b44962191ed0eaaf8d4009"
+dependencies = [
+ "cast",
+ "typenum",
 ]
 
 [[package]]
@@ -231,23 +280,79 @@ dependencies = [
 name = "modbus-rs"
 version = "0.1.0"
 dependencies = [
- "async-embedded",
  "bbqueue",
- "cortex-m",
- "cortex-m-rt",
  "crc16",
  "futures",
- "panic-rtt-core",
 ]
 
 [[package]]
-name = "panic-rtt-core"
-version = "0.1.1"
+name = "nb"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "163a1ddc73d4a50c23cae379deb674cd8df8e0d5a057a8c9df7195b009eeeaf2"
+checksum = "b1411551beb3c11dedfb0a90a0fa256b47d28b9ec2cdff34c25a2fa59e45dbdc"
+
+[[package]]
+name = "nrf-hal-common"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc36b48f37fdeeb88821733f8049bfee490fa76376746760c83bc4faa850320b"
 dependencies = [
- "cortex-m",
- "rtt-target",
+ "cast",
+ "cortex-m 0.6.2",
+ "embedded-hal",
+ "fpa",
+ "nb",
+ "nrf52840-pac",
+ "rand_core",
+ "void",
+]
+
+[[package]]
+name = "nrf52840-dk-bsp"
+version = "0.1.0"
+source = "git+https://github.com/nrf-rs/nRF52840-DK.git#56279ac3532100fc579c76c4e54867eac406abe0"
+dependencies = [
+ "cortex-m 0.5.10",
+ "cortex-m-rt",
+ "embedded-hal",
+ "nrf52840-hal",
+]
+
+[[package]]
+name = "nrf52840-hal"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6aab4c41abc02fcefbdbedfa773d213302bc00c57a0b2237c6b5bf0456da10d3"
+dependencies = [
+ "cast",
+ "cortex-m 0.6.2",
+ "embedded-hal",
+ "nb",
+ "nrf-hal-common",
+ "nrf52840-pac",
+ "void",
+]
+
+[[package]]
+name = "nrf52840-pac"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1b780a5afd2621774652f28c82837f6aa6d19cf0ad71c734fc1fe53298a2d73"
+dependencies = [
+ "bare-metal",
+ "cortex-m 0.6.2",
+ "cortex-m-rt",
+ "vcell",
+]
+
+[[package]]
+name = "panic-rtt-target"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab3dec5d8d834d63b28db55b9f0d4fd3781599527217c865cd79349c71c8deb4"
+dependencies = [
+ "cortex-m 0.6.2",
+ "rtt-target 0.1.1",
 ]
 
 [[package]]
@@ -301,6 +406,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2a38df5b15c8d5c7e8654189744d8e396bddc18ad48041a500ce52d6948941f"
 
 [[package]]
+name = "rand_core"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90bde5296fc891b0cef12a6d03ddccc162ce7b2aff54160af9338f8d40df6d19"
+
+[[package]]
 name = "riscv"
 version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -316,7 +427,17 @@ version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26ebda2070a2dd2f5d1bba0c427055f475bb011ca8215add472b6e6ba6b7265c"
 dependencies = [
- "cortex-m",
+ "ufmt-write",
+ "vcell",
+]
+
+[[package]]
+name = "rtt-target"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58b1f36984bbcf227044b3b7af1de14a6ebe51b9d21cd856a3d5ba41c70ec191"
+dependencies = [
+ "cortex-m 0.6.2",
  "ufmt-write",
  "vcell",
 ]
@@ -391,6 +512,12 @@ name = "version_check"
 version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5a972e5669d67ba988ce3dc826706fb0a8b01471c088cb0b6110b805cc36aed"
+
+[[package]]
+name = "void"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 
 [[package]]
 name = "volatile-register"

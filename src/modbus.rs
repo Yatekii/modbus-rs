@@ -34,9 +34,15 @@ impl<'a, S: ArrayLength<u8> + 'a> Modbus<'a, S> {
     /// Call this in the data received interrupt.
     pub fn on_data_received(&mut self, data: &[u8]) {
         // Get a grant that is as large as the size of the received data.
+        // Additionally the grant needs to be large enough to fit a possible second frame without any fragmenation.
+        // Thus, we reserve the remaining bytes we expect for this frame (defaulting to 0)
+        // plus 256 bytes (the max size of any frame) for the next frame.
+        // This guarantees no fragmentation for the frames received. If our DMA transfer unit
+        // is chosen smaller than the max frame size (256 bytes), it is guaranteed we never contain more than two frames in the data.
+        // This is a bit wasteful with memory but guarantees no fragmentation.
         let mut wgr = self
             .producer
-            .grant_exact(data.len())
+            .grant_exact(self.needed_bytes.unwrap_or(0) + 256)
             .unwrap_or_else(|_| panic!());
 
         // Copy the data from the receive buffer into the bbqueue.
